@@ -1,0 +1,14 @@
+{
+  "name": "thor",
+  "version": "1.0.0",
+  "description": "Wallet Token Tracker - Real-time contract deployment monitor",
+  "scripts": {
+    "start:backend": "cd backend && npm run dev",
+    "start:frontend": "cd frontend && npm run dev",
+    "dev": "concurrently \"npm run start:backend\" \"npm run start:frontend\"",
+    "setup": "node setup.js"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
