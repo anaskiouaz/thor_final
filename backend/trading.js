@@ -201,6 +201,9 @@ class TradingService {
 
             console.log(`${ts()} [Trading] ✅ Buy SUCCESS: ${tokenInfo.symbol} | TX: ${txHash}`);
 
+            const liqStr = tokenInfo.liquidity > 0 ? `\n💧 Liquidité: $${tokenInfo.liquidity.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
+            const mcStr = tokenInfo.marketCap > 0 ? `\n💎 Market Cap: $${tokenInfo.marketCap.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
+
             // Send Telegram alert
             await telegram.sendMessage(
                 `🟢 *Achat Exécuté !*\n\n` +
@@ -209,8 +212,10 @@ class TradingService {
                 `👤 Copié de: \`${walletSource.slice(0, 12)}...\`\n` +
                 `💰 Montant: ${actualSolAmount.toFixed(4)} SOL (~${tradingConfig.buyAmountEur}€)\n` +
                 `🏷️ DEX: ${actualDex}\n` +
-                `💵 Prix: $${buyPrice.toFixed(10)}\n` +
-                `🔗 [TX Solscan](https://solscan.io/tx/${txHash})\n` +
+                `💵 Prix: $${buyPrice.toFixed(10)}` +
+                liqStr +
+                mcStr +
+                `\n🔗 [TX Solscan](https://solscan.io/tx/${txHash})\n` +
                 `🎯 TP: +${tradingConfig.tpPercent}% | SL: ${tradingConfig.slPercent}%`
             );
 
@@ -298,14 +303,20 @@ class TradingService {
             const emoji = reason === 'TP' ? '💰' : reason === 'SL' ? '🛑' : '📤';
             const reasonText = reason === 'TP' ? 'Take Profit' : reason === 'SL' ? 'Stop Loss' : 'Manuel';
 
+            const tokenInfo = await this._getTokenInfo(trade.token_address);
+            const liqStr = tokenInfo.liquidity > 0 ? `\n💧 Liquidité: $${tokenInfo.liquidity.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
+            const mcStr = tokenInfo.marketCap > 0 ? `\n💎 Market Cap: $${tokenInfo.marketCap.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
+
             await telegram.sendMessage(
                 `${emoji} *${reasonText}*\n\n` +
                 `🪙 Token: \`${trade.token_address}\`\n` +
                 `📈 PnL: *${pnlStr}*\n` +
                 `💵 Entrée: $${entryPrice.toFixed(10)}\n` +
                 `💵 Sortie: $${sellPrice.toFixed(10)}\n` +
-                `📊 ATH: $${(trade.ath_usd || 0).toFixed(10)}\n` +
-                `🔗 [TX Solscan](https://solscan.io/tx/${txHash})`
+                `📊 ATH: $${(trade.ath_usd || 0).toFixed(10)}` +
+                liqStr +
+                mcStr +
+                `\n🔗 [TX Solscan](https://solscan.io/tx/${txHash})`
             );
 
             this._broadcast('trade:closed', {
@@ -503,9 +514,11 @@ class TradingService {
             return {
                 symbol: pair?.baseToken?.symbol ?? '???',
                 name: pair?.baseToken?.name ?? 'Unknown',
+                liquidity: pair?.liquidity?.usd ?? 0,
+                marketCap: pair?.fdv ?? pair?.marketCap ?? 0,
             };
         } catch {
-            return { symbol: '???', name: 'Unknown' };
+            return { symbol: '???', name: 'Unknown', liquidity: 0, marketCap: 0 };
         }
     }
 
@@ -574,13 +587,18 @@ class TradingService {
         await db.updateTradeEntryPrice(trade.id, price);
         await db.updateTradeATH(trade.id, price);
 
+        const liqStr = info.liquidity > 0 ? `\n💧 Liquidité: $${info.liquidity.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
+        const mcStr = info.marketCap > 0 ? `\n💎 Market Cap: $${info.marketCap.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
+
         await telegram.sendMessage(
             `🧪 *DRY RUN — Achat Simulé*\n\n` +
             `🪙 *${info.symbol}* (${info.name})\n` +
             `📋 \`${tokenMint}\`\n` +
             `👤 Copié de: \`${walletSource.slice(0, 12)}...\`\n` +
             `💰 Montant: ${solAmount.toFixed(4)} SOL (~${tradingConfig.buyAmountEur}€)\n` +
-            `💵 Prix: $${price.toFixed(10)}`
+            `💵 Prix: $${price.toFixed(10)}` +
+            liqStr +
+            mcStr
         );
 
         return { tradeId: trade.id, txHash: 'DRY_RUN' };
@@ -593,10 +611,29 @@ class TradingService {
         const price = await this.getPrice(trade.token_address);
         const entryPrice = trade.entry_price_usd || trade.buy_price_usd;
         const pnlPct = entryPrice > 0 ? ((price - entryPrice) / entryPrice * 100) : 0;
+        const pnlStr = pnlPct >= 0 ? `+${pnlPct.toFixed(2)}%` : `${pnlPct.toFixed(2)}%`;
 
         console.log(`${ts()} [Trading] 🧪 DRY RUN SELL: Trade #${trade.id} — ${reason} — PnL: ${pnlPct.toFixed(2)}%`);
 
         await db.closeTrade(trade.id, 'DRY_RUN', price, reason);
+
+        const tokenInfo = await this._getTokenInfo(trade.token_address);
+        const liqStr = tokenInfo.liquidity > 0 ? `\n💧 Liquidité: $${tokenInfo.liquidity.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
+        const mcStr = tokenInfo.marketCap > 0 ? `\n💎 Market Cap: $${tokenInfo.marketCap.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
+
+        const emoji = reason === 'TP' ? '💰' : reason === 'SL' ? '🛑' : '🧪';
+        const reasonText = reason === 'TP' ? 'Take Profit (Simulé)' : reason === 'SL' ? 'Stop Loss (Simulé)' : 'Manuel (Simulé)';
+
+        await telegram.sendMessage(
+            `${emoji} *${reasonText}*\n\n` +
+            `🪙 Token: \`${trade.token_address}\`\n` +
+            `📈 PnL: *${pnlStr}*\n` +
+            `💵 Entrée: $${entryPrice.toFixed(10)}\n` +
+            `💵 Sortie: $${price.toFixed(10)}\n` +
+            `📊 ATH: $${(trade.ath_usd || 0).toFixed(10)}` +
+            liqStr +
+            mcStr
+        );
 
         return { txHash: 'DRY_RUN', pnlPct };
     }

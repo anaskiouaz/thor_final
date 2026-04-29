@@ -25,6 +25,8 @@
     "node-telegram-bot-api": "^0.67.0",
     "nodemon": "^3.1.14",
     "sqlite3": "^6.0.1",
+    "winston": "^3.19.0",
+    "winston-daily-rotate-file": "^5.0.0",
     "ws": "^8.20.0"
   }
 }

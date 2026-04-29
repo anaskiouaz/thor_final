@@ -368,20 +368,27 @@ class SolanaMonitor {
                 const existing = await db.getDetectionsByWallet(walletAddress, 50);
                 if (existing.some(d => d.token_address === mint && d.tx_hash === sig)) continue;
 
+                // Check if this token was ever detected before
+                const isNewToken = !(await db.hasTokenBeenDetected(mint));
+
                 console.log(`${ts()} [Monitor] 🔥 Création token: ${mint} par ${walletAddress}`);
                 await db.logDetection(walletAddress, mint, sig, slot, 'creation');
-                await telegram.sendMessage(
-                    `🔥 *Nouveau Token Créé!*\n\n` +
-                    `👤 *Déployeur:* \`${walletAddress}\`\n` +
-                    `📄 *Mint:* \`${mint}\`\n` +
-                    `🕐 ${blockTime}\n` +
-                    `🔗 [Solscan](https://solscan.io/token/${mint})\n\n` +
-                    `💡 \`/buy ${mint}\``
-                );
 
-                // ── AUTO-BUY on token creation ──────────────────────────
-                // If a watched wallet creates a token, it's likely a Pump.fun launch
-                this._triggerAutoBuy(mint, walletAddress, 'pumpfun');
+                if (isNewToken) {
+                    await telegram.sendMessage(
+                        `🔥 *Nouveau Token Créé!*\n\n` +
+                        `👤 *Déployeur:* \`${walletAddress}\`\n` +
+                        `📄 *Mint:* \`${mint}\`\n` +
+                        `🕐 ${blockTime}\n` +
+                        `🔗 [Solscan](https://solscan.io/token/${mint})\n\n` +
+                        `💡 \`/buy ${mint}\``
+                    );
+
+                    // ── AUTO-BUY on token creation ──────────────────────────
+                    this._triggerAutoBuy(mint, walletAddress, 'pumpfun');
+                } else {
+                    console.log(`${ts()} [Monitor] ⏭️ Ignoré (Déjà vu): ${mint}`);
+                }
             }
 
             // 4. Détection achat
@@ -395,21 +402,29 @@ class SolanaMonitor {
                 const existing = await db.getDetectionsByWallet(walletAddress, 50);
                 if (existing.some(d => d.token_address === mint && d.tx_hash === sig)) continue;
 
+                // Check if this token was ever detected before
+                const isNewToken = !(await db.hasTokenBeenDetected(mint));
+
                 console.log(`${ts()} [Monitor] 💸 Achat: ${mint} par ${walletAddress} via ${purchase.dexType}${purchase.involvesDex ? ' (DEX)' : ''}`);
                 await db.logDetection(walletAddress, mint, sig, slot, 'purchase');
-                await telegram.sendMessage(
-                    `💸 *Achat Détecté!*\n\n` +
-                    `👤 *Wallet:* \`${walletAddress}\`\n` +
-                    `🪙 *Token:* \`${mint}\`\n` +
-                    `🏷️ *DEX:* ${purchase.dexType}\n` +
-                    `${purchase.involvesDex ? '🔄 Via DEX\n' : ''}` +
-                    `🕐 ${blockTime}\n` +
-                    `🔗 [TX Solscan](https://solscan.io/tx/${sig})\n\n` +
-                    `🤖 Auto-buy en cours...`
-                );
+                
+                if (isNewToken) {
+                    await telegram.sendMessage(
+                        `💸 *Nouvel Achat Détecté!*\n\n` +
+                        `👤 *Wallet:* \`${walletAddress}\`\n` +
+                        `🪙 *Token:* \`${mint}\`\n` +
+                        `🏷️ *DEX:* ${purchase.dexType}\n` +
+                        `${purchase.involvesDex ? '🔄 Via DEX\n' : ''}` +
+                        `🕐 ${blockTime}\n` +
+                        `🔗 [TX Solscan](https://solscan.io/tx/${sig})\n\n` +
+                        `🤖 Auto-buy en cours...`
+                    );
 
-                // ── AUTO-BUY on purchase detection ──────────────────────
-                this._triggerAutoBuy(mint, walletAddress, purchase.dexType);
+                    // ── AUTO-BUY on purchase detection ──────────────────────
+                    this._triggerAutoBuy(mint, walletAddress, purchase.dexType);
+                } else {
+                    console.log(`${ts()} [Monitor] ⏭️ Achat ignoré: Le token ${mint} a déjà été détecté auparavant.`);
+                }
             }
         } catch (err) {
             console.error(`${ts()} [Monitor] Erreur lors du traitement de la TX ${sig}:`, err.message);

@@ -248,6 +248,11 @@ function getDetectionsByWallet(address, limit = 10) {
     );
 }
 
+async function hasTokenBeenDetected(tokenAddress) {
+    const row = await get('SELECT 1 FROM detections WHERE token_address = ? LIMIT 1', [tokenAddress]);
+    return !!row;
+}
+
 // ─── Positions (Legacy — kept for backward compat) ───────────────────────────
 
 function openPosition(tokenAddress, buyPrice, amount, solSpent) {
@@ -510,6 +515,7 @@ module.exports = {
     logDetection,
     getDetections,
     getDetectionsByWallet,
+    hasTokenBeenDetected,
 
     // Positions (legacy)
     openPosition,
