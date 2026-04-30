@@ -1,6 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
-const trading = require('./trading'); // We'll need this to trigger buys
-const logger = require('./lib/logger');
+const trading = require('./trading');
+const logger = require('../../utils/logger');
 require('dotenv').config();
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -9,11 +9,9 @@ const chatId = process.env.TELEGRAM_CHAT_ID;
 let bot = null;
 
 if (token && chatId) {
-    // Enable polling so the bot can receive messages
     bot = new TelegramBot(token, { polling: true });
     logger.info({ component: 'Telegram' }, 'Bot initialized with polling.');
 
-    // Handle /buy [tokenAddress] [amount?]
     bot.onText(/\/buy (.+)/, async (msg, match) => {
         const fromId = msg.chat.id.toString();
         if (fromId !== chatId) {
