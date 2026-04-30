@@ -16,6 +16,7 @@ const telegram = require('./telegram');
 const pumpfun = require('./pumpfun');
 const raydium = require('./raydium');
 const config = require('./config');
+const logger = require('./lib/logger');
 require('dotenv').config();
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -28,24 +29,23 @@ const SOL_PRICE_CACHE_TTL_MS = 60_000; // 1 min for SOL/EUR price
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Returns a formatted timestamp string for logs: [HH:MM:SS.mmm] */
-function ts() {
-    const now = new Date();
-    return `[${now.toLocaleTimeString('fr-FR', { hour12: false })}.${String(now.getMilliseconds()).padStart(3, '0')}]`;
-}
 
 // ─── TradingService ──────────────────────────────────────────────────────────
 
 class TradingService {
     constructor() {
-        this.connection = new Connection(
-            process.env.RPC_URL || 'https://api.mainnet-beta.solana.com',
-            { wsEndpoint: process.env.WSS_URL, commitment: 'confirmed' }
-        );
+        const rpcUrl = process.env.RPC_URL || 'https://api.mainnet-beta.solana.com';
+        if (rpcUrl && rpcUrl.startsWith('http')) {
+            this.connection = new Connection(rpcUrl, { wsEndpoint: process.env.WSS_URL, commitment: 'confirmed' });
+        } else {
+            logger.error({ component: 'Trading' }, `❌ RPC_URL invalide: ${rpcUrl}`);
+        }
         this.wallet = null;
         this._priceCache = new Map();  // mint → { price, ts }
+        this._metricsCache = new Map(); // mint → { marketCap, liquidity, ts }
         this._solPriceEur = null;      // { price, ts }
         this._buyLock = new Set();     // prevent double-buys
+        this._sellLock = new Set();    // prevent double-sells/concurrent attempts
 
         // WebSocket broadcast function (set by server.js)
         this.broadcast = null;
@@ -54,12 +54,12 @@ class TradingService {
             try {
                 const keyBytes = bs58.decode(process.env.SOLANA_PRIVATE_KEY);
                 this.wallet = Keypair.fromSecretKey(keyBytes);
-                console.log(`${ts()} [Trading] ✅ Wallet loaded: ${this.wallet.publicKey.toString()}`);
+                logger.info({ component: 'Trading' }, `✅ Wallet loaded: ${this.wallet.publicKey.toString()}`);
             } catch (err) {
-                console.error(`${ts()} [Trading] ❌ Invalid SOLANA_PRIVATE_KEY (must be base58 encoded):`, err.message);
+                logger.error({ component: 'Trading' }, `❌ Invalid SOLANA_PRIVATE_KEY (must be base58 encoded): ${err.message}`);
             }
         } else {
-            console.warn(`${ts()} [Trading] ⚠️ SOLANA_PRIVATE_KEY not set — auto-buy disabled.`);
+            logger.warn({ component: 'Trading' }, '⚠️ SOLANA_PRIVATE_KEY not set — auto-buy disabled.');
         }
     }
 
@@ -78,25 +78,25 @@ class TradingService {
 
         // ── Guards ───────────────────────────────────────────────────────
         if (!tradingConfig.autoBuyEnabled) {
-            console.log(`${ts()} [Trading] Auto-buy disabled, skipping ${tokenMint}`);
+            logger.info({ component: 'Trading' }, `Auto-buy disabled, skipping ${tokenMint}`);
             return null;
         }
 
         if (!this.wallet) {
-            console.warn(`${ts()} [Trading] No wallet configured, skipping auto-buy`);
+            logger.warn({ component: 'Trading' }, `No wallet configured, skipping auto-buy for ${tokenMint}`);
             return null;
         }
 
         // Prevent duplicate buys
         if (this._buyLock.has(tokenMint)) {
-            console.log(`${ts()} [Trading] Already buying ${tokenMint}, skipping duplicate`);
+            logger.info({ component: 'Trading' }, `Already buying ${tokenMint}, skipping duplicate`);
             return null;
         }
 
         // Check if we already have an open trade for this token
         const hasOpen = await db.hasOpenTradeForToken(tokenMint);
         if (hasOpen) {
-            console.log(`${ts()} [Trading] Already have open trade for ${tokenMint}, skipping`);
+            logger.info({ component: 'Trading' }, `Already have open trade for ${tokenMint}, skipping`);
             return null;
         }
 
@@ -111,7 +111,7 @@ class TradingService {
             // ── Calculate SOL amount (8€ equivalent) ─────────────────────
             const solAmount = await this._calculateSolAmount(tradingConfig.buyAmountEur);
             if (solAmount <= 0) {
-                console.error(`${ts()} [Trading] Could not calculate SOL amount`);
+                logger.error({ component: 'Trading' }, 'Could not calculate SOL amount');
                 return null;
             }
 
@@ -119,18 +119,16 @@ class TradingService {
             const balance = await this._getWalletBalance();
             const actualSolAmount = Math.min(solAmount, Math.max(0, balance - 0.005)); // Keep 0.005 SOL for fees
             if (actualSolAmount <= 0) {
-                console.error(`${ts()} [Trading] Insufficient balance`);
+                logger.error({ component: 'Trading' }, 'Insufficient balance for auto-buy');
                 await telegram.sendMessage(`⚠️ *Balance insuffisante*\nSolde: ${balance.toFixed(4)} SOL`);
                 return null;
             }
 
-            console.log(`${ts()} [Trading] 🎯 Auto-buy: ${tokenMint}`);
-            console.log(`${ts()} [Trading]    Source wallet: ${walletSource.slice(0, 12)}...`);
-            console.log(`${ts()} [Trading]    DEX: ${dexType} | Amount: ${actualSolAmount.toFixed(4)} SOL (~${tradingConfig.buyAmountEur}€)`);
+            logger.info({ component: 'Trading', token: tokenMint, wallet: walletSource, dex: dexType }, `🎯 Auto-buy: ${tokenMint} | Amount: ${actualSolAmount.toFixed(4)} SOL (~${tradingConfig.buyAmountEur}€)`);
 
             // ── Get optimal priority fee ─────────────────────────────────
             const priorityFee = await this._getOptimalPriorityFee(tradingConfig.maxPriorityFeeEur);
-            console.log(`${ts()} [Trading]    Priority fee: ${(priorityFee / 1e9).toFixed(6)} SOL`);
+            logger.debug({ component: 'Trading' }, `Priority fee: ${(priorityFee / 1e9).toFixed(6)} SOL`);
 
             // ── Create pending trade in DB ────────────────────────────────
             const trade = await db.createTrade({
@@ -153,27 +151,27 @@ class TradingService {
                 try {
                     const { onCurve } = await pumpfun.isPumpFunToken(tokenMint);
                     if (onCurve) {
-                        console.log(`${ts()} [Trading] 🟣 Attempting Pump.fun bonding curve buy...`);
+                        logger.info({ component: 'Trading', token: tokenMint }, '🟣 Attempting Pump.fun bonding curve buy...');
                         result = await pumpfun.buyOnBondingCurve(
                             tokenMint, actualSolAmount, this.wallet, this.connection, priorityFee
                         );
                         actualDex = 'pumpfun';
                     }
                 } catch (err) {
-                    console.warn(`${ts()} [Trading] Pump.fun buy failed: ${err.message}`);
+                    logger.warn({ component: 'Trading', token: tokenMint }, `Pump.fun buy failed: ${err.message}`);
                 }
             }
 
             // Strategy 2: Raydium/Jupiter (fallback or primary for Raydium tokens)
             if (!result) {
                 try {
-                    console.log(`${ts()} [Trading] 🔵 Attempting Raydium/Jupiter buy...`);
+                    logger.info({ component: 'Trading', token: tokenMint }, '🔵 Attempting Raydium/Jupiter buy...');
                     result = await raydium.buyToken(
                         tokenMint, actualSolAmount, this.wallet, this.connection, priorityFee
                     );
                     actualDex = 'raydium';
                 } catch (err) {
-                    console.error(`${ts()} [Trading] Raydium/Jupiter buy failed: ${err.message}`);
+                    logger.error({ component: 'Trading', token: tokenMint }, `Raydium/Jupiter buy failed: ${err.message}`);
                     // Mark trade as failed
                     await db.closeTrade(trade.id, null, 0, 'BUY_FAILED');
                     await telegram.sendMessage(
@@ -199,10 +197,10 @@ class TradingService {
             // Get token info for alerts
             const tokenInfo = await this._getTokenInfo(tokenMint);
 
-            console.log(`${ts()} [Trading] ✅ Buy SUCCESS: ${tokenInfo.symbol} | TX: ${txHash}`);
+            logger.info({ component: 'Trading', token: tokenMint, symbol: tokenInfo.symbol, txHash }, `✅ Buy SUCCESS: ${tokenInfo.symbol} | TX: ${txHash}`);
 
-            const liqStr = tokenInfo.liquidity > 0 ? `\n💧 Liquidité: $${tokenInfo.liquidity.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
-            const mcStr = tokenInfo.marketCap > 0 ? `\n💎 Market Cap: $${tokenInfo.marketCap.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
+            const liqStr = tokenInfo.liquidity > 0 ? `\n💧 Liquidité: $${tokenInfo.liquidity.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : '';
+            const mcStr = tokenInfo.marketCap > 0 ? `\n💎 Market Cap: $${tokenInfo.marketCap.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : '';
 
             // Send Telegram alert
             await telegram.sendMessage(
@@ -239,7 +237,7 @@ class TradingService {
             return { tradeId: trade.id, txHash };
 
         } catch (err) {
-            console.error(`${ts()} [Trading] Auto-buy error for ${tokenMint}:`, err.message);
+            logger.error({ component: 'Trading', token: tokenMint }, `Auto-buy error: ${err.message}`, { stack: err.stack });
             return null;
         } finally {
             this._buyLock.delete(tokenMint);
@@ -253,14 +251,26 @@ class TradingService {
         if (!this.wallet) throw new Error('Wallet not configured');
         const tradingConfig = config.getTradingConfig();
 
-        console.log(`${ts()} [Trading] 📤 Selling trade #${trade.id} (${trade.token_address}) — Reason: ${reason}`);
+        // ── LOCK CHECK ───────────────────────────────────────────────────
+        if (this._sellLock.has(trade.id)) {
+            logger.warn({ component: 'Trading', tradeId: trade.id }, `Sell already in progress for trade #${trade.id}, ignoring request.`);
+            return null;
+        }
+        this._sellLock.add(trade.id);
+
+        logger.logTrade(trade, `📤 Selling trade — Reason: ${reason}`);
 
         if (tradingConfig.dryRun) {
+            this._sellLock.delete(trade.id);
             return this._dryRunSell(trade, reason);
         }
 
         try {
-            const currentPrice = await this.getPrice(trade.token_address);
+            await db.incrementSellAttempts(trade.id);
+            await db.logTradeEvent(trade.id, 'INFO', `Démarrage vente (${reason})`);
+
+            const quote = await this.getTokenQuote(trade.token_address);
+            const sellPrice = quote.price;
             const priorityFee = await this._getOptimalPriorityFee(tradingConfig.maxPriorityFeeEur);
 
             let result = null;
@@ -276,20 +286,26 @@ class TradingService {
                         );
                     }
                 } catch (err) {
-                    console.warn(`${ts()} [Trading] Pump.fun sell failed, trying Jupiter: ${err.message}`);
+                    logger.warn({ component: 'Trading', tradeId: trade.id }, `Pump.fun sell failed, trying Jupiter: ${err.message}`);
+                    await db.logTradeEvent(trade.id, 'ERROR', `Pump.fun sell failed: ${err.message}`);
                 }
             }
 
             // Fallback to Jupiter
             if (!result) {
-                result = await raydium.sellToken(
-                    trade.token_address, trade.amount_tokens,
-                    this.wallet, this.connection, priorityFee
-                );
+                try {
+                    result = await raydium.sellToken(
+                        trade.token_address, trade.amount_tokens,
+                        this.wallet, this.connection, priorityFee
+                    );
+                } catch (err) {
+                    await db.logTradeEvent(trade.id, 'ERROR', `Raydium/Jupiter sell failed: ${err.message}`);
+                    throw err; // Re-throw to be caught by outer try/catch
+                }
             }
 
             const { txHash } = result;
-            const sellPrice = await this.getPrice(trade.token_address);
+            await db.logTradeEvent(trade.id, 'TX_SENT', 'Transaction de vente envoyée', { txHash });
 
             // Close trade in DB
             await db.closeTrade(trade.id, txHash, sellPrice, reason);
@@ -303,9 +319,8 @@ class TradingService {
             const emoji = reason === 'TP' ? '💰' : reason === 'SL' ? '🛑' : '📤';
             const reasonText = reason === 'TP' ? 'Take Profit' : reason === 'SL' ? 'Stop Loss' : 'Manuel';
 
-            const tokenInfo = await this._getTokenInfo(trade.token_address);
-            const liqStr = tokenInfo.liquidity > 0 ? `\n💧 Liquidité: $${tokenInfo.liquidity.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
-            const mcStr = tokenInfo.marketCap > 0 ? `\n💎 Market Cap: $${tokenInfo.marketCap.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
+            const liqStr = quote.liquidity > 0 ? `\n💧 Liquidité: $${quote.liquidity.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : '';
+            const mcStr = quote.marketCap > 0 ? `\n💎 Market Cap: $${quote.marketCap.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : '';
 
             await telegram.sendMessage(
                 `${emoji} *${reasonText}*\n\n` +
@@ -327,74 +342,106 @@ class TradingService {
                 reason,
             });
 
-            console.log(`${ts()} [Trading] ✅ Sell SUCCESS: #${trade.id} | ${pnlStr} | Reason: ${reason}`);
+            logger.logTrade(trade, `✅ Sell SUCCESS: ${pnlStr} | Reason: ${reason}`, 'info', { sellPrice, pnlPct, txHash });
             return { txHash, pnlPct };
 
         } catch (err) {
-            console.error(`${ts()} [Trading] Sell failed for trade #${trade.id}:`, err.message);
+            logger.error({ component: 'Trading', tradeId: trade.id }, `Sell failed: ${err.message}`, { stack: err.stack });
+            await db.updateTradeError(trade.id, err.message);
             await telegram.sendMessage(
                 `❌ *Vente Échouée*\n` +
                 `Trade #${trade.id} | ${trade.token_address}\n` +
                 `❗ ${err.message}`
             );
             return null;
+        } finally {
+            this._sellLock.delete(trade.id);
         }
     }
 
     /**
-     * Fetch current USD price for a token via Jupiter Price API v2.
+     * Fetch current USD price for a token.
      */
     async getPrice(tokenAddress) {
-        const cached = this._priceCache.get(tokenAddress);
-        if (cached && Date.now() - cached.ts < PRICE_CACHE_TTL_MS) {
-            return cached.price;
+        const quote = await this.getTokenQuote(tokenAddress);
+        return quote.price;
+    }
+
+    /**
+     * Robust pricing engine with multi-source fallback and caching.
+     * Returns { price, marketCap, liquidity, source }
+     */
+    async getTokenQuote(tokenAddress) {
+        const now = Date.now();
+        const priceCached = this._priceCache.get(tokenAddress);
+        const metricsCached = this._metricsCache.get(tokenAddress);
+
+        // TTL: 10s for price, 60s for metrics (MCap/Liq)
+        const isPriceFresh = priceCached && (now - priceCached.ts < PRICE_CACHE_TTL_MS);
+        const isMetricsFresh = metricsCached && (now - metricsCached.ts < 60_000);
+
+        if (isPriceFresh && isMetricsFresh) {
+            return {
+                price: priceCached.price,
+                marketCap: metricsCached.marketCap,
+                liquidity: metricsCached.liquidity,
+                source: metricsCached.source
+            };
         }
 
-        // Strategy 1: Jupiter Price API (works for Raydium-listed tokens)
+        let price = priceCached?.price || 0;
+        let marketCap = metricsCached?.marketCap || 0;
+        let liquidity = metricsCached?.liquidity || 0;
+        let source = metricsCached?.source || 'unknown';
+
+        // --- Strategy 1: Jupiter (Raydium listed) ---
         try {
-            const { data } = await axios.get(
-                `https://api.jup.ag/price/v2?ids=${tokenAddress}`,
-                { timeout: 5_000 }
-            );
-            const price = Number(data?.data?.[tokenAddress]?.price ?? 0);
-            if (price > 0) {
-                this._priceCache.set(tokenAddress, { price, ts: Date.now() });
-                return price;
+            const { data } = await axios.get(`https://api.jup.ag/price/v2?ids=${tokenAddress}`, { timeout: 3000 });
+            const jupPrice = Number(data?.data?.[tokenAddress]?.price ?? 0);
+            if (jupPrice > 0) {
+                price = jupPrice;
+                source = 'jupiter';
+                this._priceCache.set(tokenAddress, { price, ts: now });
             }
         } catch (err) {
-            console.warn(`${ts()} [Trading] Jupiter price fetch failed:`, err.message);
+            logger.debug({ component: 'Trading', token: tokenAddress }, `Jupiter price fetch failed: ${err.message}`);
         }
 
-        // Strategy 2: Pump.fun bonding curve price (for tokens still on the curve)
+        // --- Strategy 2: Pump.fun bonding curve ---
+        if (price === 0 || !isMetricsFresh) {
+            try {
+                const curvePrice = await pumpfun.getBondingCurvePrice(tokenAddress);
+                if (curvePrice && curvePrice.priceUsd > 0) {
+                    if (price === 0) price = curvePrice.priceUsd;
+                    marketCap = curvePrice.marketCap;
+                    source = 'pumpfun';
+                    this._priceCache.set(tokenAddress, { price, ts: now });
+                    this._metricsCache.set(tokenAddress, { marketCap, liquidity: 0, source, ts: now });
+                    if (price > 0 && marketCap > 0) return { price, marketCap, liquidity, source };
+                }
+            } catch (err) {
+                logger.debug({ component: 'Trading', token: tokenAddress }, `Pump.fun quote failed: ${err.message}`);
+            }
+        }
+
+        // --- Strategy 3: DexScreener (Fallback & Metrics) ---
         try {
-            const curvePrice = await pumpfun.getBondingCurvePrice(tokenAddress);
-            if (curvePrice && curvePrice.priceUsd > 0) {
-                console.log(`${ts()} [Trading] 🟣 Using Pump.fun price for ${tokenAddress.slice(0, 8)}...: $${curvePrice.priceUsd.toFixed(12)}`);
-                this._priceCache.set(tokenAddress, { price: curvePrice.priceUsd, ts: Date.now() });
-                return curvePrice.priceUsd;
+            const { data } = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`, { timeout: 5000 });
+            const pair = data?.pairs?.[0];
+            if (pair) {
+                if (price === 0) price = Number(pair.priceUsd || 0);
+                marketCap = Number(pair.fdv || pair.marketCap || 0);
+                liquidity = Number(pair.liquidity?.usd || 0);
+                source = 'dexscreener';
+
+                this._priceCache.set(tokenAddress, { price, ts: now });
+                this._metricsCache.set(tokenAddress, { marketCap, liquidity, source, ts: now });
             }
         } catch (err) {
-            console.warn(`${ts()} [Trading] Pump.fun price fetch failed:`, err.message);
+            logger.debug({ component: 'Trading', token: tokenAddress }, `DexScreener quote failed: ${err.message}`);
         }
 
-        // Strategy 3: DexScreener fallback
-        try {
-            const { data } = await axios.get(
-                `https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`,
-                { timeout: 5_000 }
-            );
-            const price = Number(data?.pairs?.[0]?.priceUsd ?? 0);
-            if (price > 0) {
-                console.log(`${ts()} [Trading] 📊 Using DexScreener price for ${tokenAddress.slice(0, 8)}...: $${price.toFixed(12)}`);
-                this._priceCache.set(tokenAddress, { price, ts: Date.now() });
-                return price;
-            }
-        } catch (err) {
-            console.warn(`${ts()} [Trading] DexScreener price fetch failed:`, err.message);
-        }
-
-        console.warn(`${ts()} [Trading] ⚠️ No price found for ${tokenAddress.slice(0, 8)}... from any source`);
-        return 0;
+        return { price, marketCap, liquidity, source };
     }
 
     // ── Private helpers ─────────────────────────────────────────────────────
@@ -411,13 +458,13 @@ class TradingService {
             const solPriceEur = await this._getSolPriceEur();
             if (solPriceEur <= 0) return 0;
             const solAmount = eurAmount / solPriceEur;
-            console.log(`${ts()} [Trading] ${eurAmount}€ = ${solAmount.toFixed(6)} SOL (SOL/EUR: ${solPriceEur.toFixed(2)}€)`);
+            logger.info({ component: 'Trading' }, `${eurAmount}€ = ${solAmount.toFixed(6)} SOL (SOL/EUR: ${solPriceEur.toFixed(2)}€)`);
             return solAmount;
         } catch (err) {
-            console.error(`${ts()} [Trading] EUR→SOL conversion failed:`, err.message);
+            logger.error({ component: 'Trading' }, `EUR→SOL conversion failed: ${err.message}`);
             // Fallback to default
             const fallback = config.getTradingConfig().defaultBuyAmountSol;
-            console.warn(`${ts()} [Trading] Using fallback: ${fallback} SOL`);
+            logger.warn({ component: 'Trading' }, `Using fallback: ${fallback} SOL`);
             return fallback;
         }
     }
@@ -496,7 +543,7 @@ class TradingService {
             return optimalFee;
 
         } catch (err) {
-            console.warn(`${ts()} [Trading] Priority fee fetch failed, using default:`, err.message);
+            logger.warn({ component: 'Trading' }, `Priority fee fetch failed, using default: ${err.message}`);
             return 100_000; // 0.0001 SOL fallback
         }
     }
@@ -532,7 +579,7 @@ class TradingService {
                 const price = await this.getPrice(tokenMint);
                 if (price > 0) {
                     await db.updateTradeEntryPrice(tradeId, price);
-                    console.log(`${ts()} [Trading] 📊 Entry price (T+${delaySec}s) for trade #${tradeId}: $${price.toFixed(10)}`);
+                    logger.info({ component: 'Trading', tradeId }, `📊 Entry price (T+${delaySec}s) recorded: $${price.toFixed(10)}`);
 
                     // Also initialize ATH with entry price
                     await db.updateTradeATH(tradeId, price);
@@ -549,7 +596,7 @@ class TradingService {
                     });
                 }
             } catch (err) {
-                console.warn(`${ts()} [Trading] Failed to record entry price for trade #${tradeId}:`, err.message);
+                logger.warn({ component: 'Trading', tradeId }, `Failed to record entry price: ${err.message}`);
             }
         }, delaySec * 1000);
     }
@@ -563,11 +610,7 @@ class TradingService {
         const price = await this.getPrice(tokenMint);
         const info = await this._getTokenInfo(tokenMint);
 
-        console.log(`${ts()} [Trading] 🧪 DRY RUN BUY: ${info.symbol} (${tokenMint})`);
-        console.log(`${ts()} [Trading]    Would spend: ${solAmount.toFixed(4)} SOL (~${tradingConfig.buyAmountEur}€)`);
-        console.log(`${ts()} [Trading]    Current price: $${price.toFixed(10)}`);
-        console.log(`${ts()} [Trading]    Source: ${walletSource}`);
-        console.log(`${ts()} [Trading]    DEX: ${dexType}`);
+        logger.info({ component: 'Trading', token: tokenMint, dryRun: true }, `🧪 DRY RUN BUY: ${info.symbol} | Amount: ${solAmount.toFixed(4)} SOL (~${tradingConfig.buyAmountEur}€)`);
 
         // Create a trade record even in dry run
         const trade = await db.createTrade({
@@ -587,8 +630,8 @@ class TradingService {
         await db.updateTradeEntryPrice(trade.id, price);
         await db.updateTradeATH(trade.id, price);
 
-        const liqStr = info.liquidity > 0 ? `\n💧 Liquidité: $${info.liquidity.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
-        const mcStr = info.marketCap > 0 ? `\n💎 Market Cap: $${info.marketCap.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
+        const liqStr = info.liquidity > 0 ? `\n💧 Liquidité: $${info.liquidity.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : '';
+        const mcStr = info.marketCap > 0 ? `\n💎 Market Cap: $${info.marketCap.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : '';
 
         await telegram.sendMessage(
             `🧪 *DRY RUN — Achat Simulé*\n\n` +
@@ -613,13 +656,13 @@ class TradingService {
         const pnlPct = entryPrice > 0 ? ((price - entryPrice) / entryPrice * 100) : 0;
         const pnlStr = pnlPct >= 0 ? `+${pnlPct.toFixed(2)}%` : `${pnlPct.toFixed(2)}%`;
 
-        console.log(`${ts()} [Trading] 🧪 DRY RUN SELL: Trade #${trade.id} — ${reason} — PnL: ${pnlPct.toFixed(2)}%`);
+        logger.info({ component: 'Trading', tradeId: trade.id, dryRun: true }, `🧪 DRY RUN SELL: ${pnlStr} | Reason: ${reason}`);
 
         await db.closeTrade(trade.id, 'DRY_RUN', price, reason);
 
         const tokenInfo = await this._getTokenInfo(trade.token_address);
-        const liqStr = tokenInfo.liquidity > 0 ? `\n💧 Liquidité: $${tokenInfo.liquidity.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
-        const mcStr = tokenInfo.marketCap > 0 ? `\n💎 Market Cap: $${tokenInfo.marketCap.toLocaleString('en-US', {maximumFractionDigits: 0})}` : '';
+        const liqStr = tokenInfo.liquidity > 0 ? `\n💧 Liquidité: $${tokenInfo.liquidity.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : '';
+        const mcStr = tokenInfo.marketCap > 0 ? `\n💎 Market Cap: $${tokenInfo.marketCap.toLocaleString('en-US', { maximumFractionDigits: 0 })}` : '';
 
         const emoji = reason === 'TP' ? '💰' : reason === 'SL' ? '🛑' : '🧪';
         const reasonText = reason === 'TP' ? 'Take Profit (Simulé)' : reason === 'SL' ? 'Stop Loss (Simulé)' : 'Manuel (Simulé)';

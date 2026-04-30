@@ -10,6 +10,7 @@ const { Connection, PublicKey } = require('@solana/web3.js');
 const db = require('./database');
 const telegram = require('./telegram');
 const config = require('./config');
+const logger = require('./lib/logger');
 require('dotenv').config();
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -28,15 +29,9 @@ const MAX_PROCESSED_SIZE = 5_000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Returns a formatted timestamp string for logs: [HH:MM:SS.mmm] */
-function ts() {
-    const now = new Date();
-    return `[${now.toLocaleTimeString('fr-FR', { hour12: false })}.${String(now.getMilliseconds()).padStart(3, '0')}]`;
-}
-
 async function heliusRpc(method, params) {
     const { rpcUrl } = config.getHeliusConfig();
-    console.log(`${ts()} [Monitor API] Helius RPC: ${method}`);
+    logger.debug({ component: 'Monitor API' }, `Helius RPC: ${method}`);
     const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
     
     try {
@@ -73,7 +68,7 @@ async function withRetry(fn, retries = 3, baseDelayMs = 1_500) {
             lastErr = err;
             if (attempt < retries - 1) {
                 const delay = baseDelayMs * 2 ** attempt;
-                console.warn(`${ts()} [Monitor] Retry ${attempt + 1}/${retries} in ${delay}ms — ${err.message}`);
+                logger.warn({ component: 'Monitor' }, `Retry ${attempt + 1}/${retries} in ${delay}ms — ${err.message}`);
                 await sleep(delay);
             }
         }
@@ -176,7 +171,11 @@ class SolanaMonitor {
         this._trading = null;
 
         const { rpcUrl, wssUrl } = config.getHeliusConfig();
-        this.connection = new Connection(rpcUrl, { wsEndpoint: wssUrl, commitment: 'confirmed' });
+        if (rpcUrl && rpcUrl.startsWith('http')) {
+            this.connection = new Connection(rpcUrl, { wsEndpoint: wssUrl, commitment: 'confirmed' });
+        } else {
+            logger.error({ component: 'Monitor' }, `❌ RPC_URL invalide ou manquant: ${rpcUrl}`);
+        }
 
         global.solanaMonitor = this; // Permettre au heliusRpc helper de trigger une reconnexion
     }
@@ -213,13 +212,13 @@ class SolanaMonitor {
             }
         }
 
-        console.log(`${ts()} [Monitor] 👀 Surveillance de ${this.watchedWallets.size} wallet(s) via WebSocket.`);
+        logger.info({ component: 'Monitor' }, `👀 Surveillance de ${this.watchedWallets.size} wallet(s) via WebSocket.`);
     }
 
     async start() {
         if (this.isMonitoring) return;
         if (!process.env.HELIUS_API_KEY) {
-            console.error('[Monitor] ❌ HELIUS_API_KEY manquant — monitor non démarré.');
+            logger.error({ component: 'Monitor' }, '❌ HELIUS_API_KEY manquant — monitor non démarré.');
             return;
         }
         this.isMonitoring = true;
@@ -231,12 +230,12 @@ class SolanaMonitor {
             for (const sig of recentSigs) {
                 this.processedTxs.set(sig, Date.now());
             }
-            console.log(`${ts()} [Monitor] 🧠 Mémoire chargée: ${this.processedTxs.size} signatures déjà traitées.`);
+            logger.info({ component: 'Monitor' }, `🧠 Mémoire chargée: ${this.processedTxs.size} signatures déjà traitées.`);
         } catch (err) {
-            console.warn(`${ts()} [Monitor] Impossible de charger les signatures traitées:`, err.message);
+            logger.warn({ component: 'Monitor' }, `Impossible de charger les signatures traitées: ${err.message}`);
         }
 
-        console.log(`${ts()} [Monitor] ✅ Solana monitor démarré (Helius RPC + Auto-Buy).`);
+        logger.info({ component: 'Monitor' }, '✅ Solana monitor démarré (Helius RPC + Auto-Buy).');
         this._loop();
     }
 
@@ -245,12 +244,12 @@ class SolanaMonitor {
         for (const [addr, subId] of this.subscriptions) {
             this._unsubscribe(addr);
         }
-        console.log(`${ts()} [Monitor] 🛑 Solana monitor arrêté.`);
+        logger.info({ component: 'Monitor' }, '🛑 Solana monitor arrêté.');
     }
 
     /** Reconnexion suite à un basculement de quota */
     reconnect() {
-        console.log(`${ts()} [Monitor] 🔄 Reconnexion des WebSockets avec la nouvelle clé...`);
+        logger.info({ component: 'Monitor' }, '🔄 Reconnexion des WebSockets avec la nouvelle clé...');
         const { rpcUrl, wssUrl } = config.getHeliusConfig();
         
         // Fermer les anciennes subs
@@ -259,11 +258,15 @@ class SolanaMonitor {
         }
         
         // Nouvelle connexion
-        this.connection = new Connection(rpcUrl, { wsEndpoint: wssUrl, commitment: 'confirmed' });
-        
-        // Rétablir les subs
-        for (const addr of this.watchedWallets) {
-            this._subscribe(addr);
+        if (rpcUrl && rpcUrl.startsWith('http')) {
+            this.connection = new Connection(rpcUrl, { wsEndpoint: wssUrl, commitment: 'confirmed' });
+            
+            // Rétablir les subs
+            for (const addr of this.watchedWallets) {
+                this._subscribe(addr);
+            }
+        } else {
+            logger.error({ component: 'Monitor' }, `❌ Impossible de reconnecter : RPC_URL invalide (${rpcUrl})`);
         }
     }
 
@@ -280,15 +283,15 @@ class SolanaMonitor {
                     const sig = logs.signature;
                     if (this.processedTxs.has(sig)) return;
 
-                    console.log(`${ts()} [Monitor] ⚡ WebSocket alert for ${address.slice(0, 8)}... (TX: ${sig.slice(0, 8)}...)`);
+                    logger.info({ component: 'Monitor' }, `⚡ WebSocket alert for ${address.slice(0, 8)}... (TX: ${sig.slice(0, 8)}...)`);
                     await this._processSignature(address, sig);
                 },
                 'confirmed'
             );
             this.subscriptions.set(address, subId);
-            console.log(`${ts()} [Monitor] 🔌 WebSocket sub établi: ${address.slice(0, 12)}...`);
+            logger.info({ component: 'Monitor' }, `🔌 WebSocket sub établi: ${address.slice(0, 12)}...`);
         } catch (err) {
-            console.error(`${ts()} [Monitor] Erreur subscription ${address}:`, err.message);
+            logger.error({ component: 'Monitor' }, `Erreur subscription ${address}: ${err.message}`);
         }
     }
 
@@ -298,7 +301,7 @@ class SolanaMonitor {
         if (subId !== undefined) {
             this.connection.removeOnLogsListener(subId).catch(() => { });
             this.subscriptions.delete(address);
-            console.log(`${ts()} [Monitor] 🔌 WebSocket unsub: ${address.slice(0, 12)}...`);
+            logger.info({ component: 'Monitor' }, `🔌 WebSocket unsub: ${address.slice(0, 12)}...`);
         }
     }
 
@@ -313,7 +316,7 @@ class SolanaMonitor {
                     await sleep(WALLET_DELAY_MS);
                 }
             } catch (err) {
-                console.error(`${ts()} [Monitor] Loop error:`, err.message);
+                logger.error({ component: 'Monitor' }, `Loop error: ${err.message}`, { stack: err.stack });
             }
             this._evict();
             await sleep(POLL_INTERVAL_MS);
@@ -352,7 +355,7 @@ class SolanaMonitor {
                     { maxSupportedTransactionVersion: 0, commitment: 'confirmed', encoding: 'jsonParsed' },
                 ])
             ).catch(err => {
-                console.warn(`${ts()} [Monitor] TX ignorée ${sig.slice(0, 12)}…: ${err.message}`);
+                logger.warn({ component: 'Monitor' }, `TX ignorée ${sig.slice(0, 12)}…: ${err.message}`);
                 return null;
             });
 
@@ -371,7 +374,7 @@ class SolanaMonitor {
                 // Check if this token was ever detected before
                 const isNewToken = !(await db.hasTokenBeenDetected(mint));
 
-                console.log(`${ts()} [Monitor] 🔥 Création token: ${mint} par ${walletAddress}`);
+                logger.info({ component: 'Monitor' }, `🔥 Création token: ${mint} par ${walletAddress}`);
                 await db.logDetection(walletAddress, mint, sig, slot, 'creation');
 
                 if (isNewToken) {
@@ -387,7 +390,7 @@ class SolanaMonitor {
                     // ── AUTO-BUY on token creation ──────────────────────────
                     this._triggerAutoBuy(mint, walletAddress, 'pumpfun');
                 } else {
-                    console.log(`${ts()} [Monitor] ⏭️ Ignoré (Déjà vu): ${mint}`);
+                    logger.debug({ component: 'Monitor' }, `⏭️ Creation ignorée (Déjà vu): ${mint}`);
                 }
             }
 
@@ -405,7 +408,7 @@ class SolanaMonitor {
                 // Check if this token was ever detected before
                 const isNewToken = !(await db.hasTokenBeenDetected(mint));
 
-                console.log(`${ts()} [Monitor] 💸 Achat: ${mint} par ${walletAddress} via ${purchase.dexType}${purchase.involvesDex ? ' (DEX)' : ''}`);
+                logger.info({ component: 'Monitor' }, `💸 Achat: ${mint} par ${walletAddress} via ${purchase.dexType}${purchase.involvesDex ? ' (DEX)' : ''}`);
                 await db.logDetection(walletAddress, mint, sig, slot, 'purchase');
                 
                 if (isNewToken) {
@@ -423,11 +426,11 @@ class SolanaMonitor {
                     // ── AUTO-BUY on purchase detection ──────────────────────
                     this._triggerAutoBuy(mint, walletAddress, purchase.dexType);
                 } else {
-                    console.log(`${ts()} [Monitor] ⏭️ Achat ignoré: Le token ${mint} a déjà été détecté auparavant.`);
+                    logger.debug({ component: 'Monitor' }, `⏭️ Achat ignoré: Le token ${mint} a déjà été détecté auparavant.`);
                 }
             }
         } catch (err) {
-            console.error(`${ts()} [Monitor] Erreur lors du traitement de la TX ${sig}:`, err.message);
+            logger.error({ component: 'Monitor' }, `Erreur lors du traitement de la TX ${sig}: ${err.message}`, { stack: err.stack });
         }
     }
 
@@ -441,10 +444,10 @@ class SolanaMonitor {
             try {
                 const result = await this.trading.autoBuy(tokenMint, walletSource, dexType);
                 if (result) {
-                    console.log(`${ts()} [Monitor] 🟢 Auto-buy triggered: trade #${result.tradeId}`);
+                    logger.info({ component: 'Monitor' }, `🟢 Auto-buy triggered: trade #${result.tradeId}`);
                 }
             } catch (err) {
-                console.error(`${ts()} [Monitor] Auto-buy error for ${tokenMint}:`, err.message);
+                logger.error({ component: 'Monitor' }, `Auto-buy error for ${tokenMint}: ${err.message}`, { stack: err.stack });
             }
         });
     }

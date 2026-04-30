@@ -7,11 +7,12 @@
 
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const logger = require('./lib/logger');
 
 const DB_PATH = path.resolve(__dirname, 'tracker.db');
 const db = new sqlite3.Database(DB_PATH, (err) => {
-    if (err) console.error('[DB] Failed to open database:', err.message);
-    else console.log('[DB] Database opened:', DB_PATH);
+    if (err) logger.error({ component: 'DB' }, `Failed to open database: ${err.message}`);
+    else logger.info({ component: 'DB' }, `Database opened: ${DB_PATH}`);
 });
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
@@ -89,10 +90,31 @@ db.serialize(() => {
             sell_reason     TEXT,
             status          TEXT     DEFAULT 'PENDING',
             dex_used        TEXT,
-            priority_fee    REAL     DEFAULT 0,
-            created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
-            closed_at       DATETIME
+            priority_fee         REAL     DEFAULT 0,
+            last_error           TEXT,
+            sell_attempts        INTEGER  DEFAULT 0,
+            last_sell_attempt_at DATETIME,
+            created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
+            closed_at            DATETIME
         )
+    `);
+
+    // ── Trade Events (Audit Log) ─────────────────────────────────────────────
+    db.run(`
+        CREATE TABLE IF NOT EXISTS trade_events (
+            id         INTEGER  PRIMARY KEY AUTOINCREMENT,
+            trade_id   INTEGER  NOT NULL,
+            type       TEXT     NOT NULL, -- 'INFO', 'ERROR', 'TX_SENT', 'TX_CONFIRMED'
+            msg        TEXT,
+            meta       TEXT,              -- JSON string
+            timestamp  DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (trade_id) REFERENCES trades(id)
+        )
+    `);
+
+    db.run(`
+        CREATE INDEX IF NOT EXISTS idx_trade_events_trade
+        ON trade_events (trade_id, timestamp)
     `);
 
     db.run(`
@@ -146,27 +168,48 @@ db.serialize(() => {
 
     // --- Migration: Add 'chain' to 'wallets' if missing ---
     db.all("PRAGMA table_info(wallets)", (err, rows) => {
-        if (err) return console.error('[DB] Schema check failed:', err.message);
+        if (err) return logger.error({ component: 'DB' }, `Schema check failed: ${err.message}`);
         const hasChain = rows.some(r => r.name === 'chain');
         if (!hasChain) {
-            console.log('[DB] Migrating: Adding "chain" column to "wallets" table...');
+            logger.info({ component: 'DB' }, 'Migrating: Adding "chain" column to "wallets" table...');
             db.run("ALTER TABLE wallets ADD COLUMN chain TEXT DEFAULT 'solana'", (err) => {
-                if (err) console.error('[DB] Migration failed:', err.message);
-                else console.log('[DB] Migration successful: "chain" column added.');
+                if (err) logger.error({ component: 'DB' }, `Migration failed: ${err.message}`);
+                else logger.info({ component: 'DB' }, 'Migration successful: "chain" column added.');
             });
         }
     });
 
     // --- Migration: Add 'type' to 'detections' if missing ---
     db.all("PRAGMA table_info(detections)", (err, rows) => {
-        if (err) return console.error('[DB] Schema check failed:', err.message);
+        if (err) return logger.error({ component: 'DB' }, `Schema check failed: ${err.message}`);
         const hasType = rows.some(r => r.name === 'type');
         if (!hasType) {
-            console.log('[DB] Migrating: Adding "type" column to "detections" table...');
+            logger.info({ component: 'DB' }, 'Migrating: Adding "type" column to "detections" table...');
             db.run("ALTER TABLE detections ADD COLUMN type TEXT DEFAULT 'unknown'", (err) => {
-                if (err) console.error('[DB] Migration failed:', err.message);
-                else console.log('[DB] Migration successful: "type" column added.');
+                if (err) logger.error({ component: 'DB' }, `Migration failed: ${err.message}`);
+                else logger.info({ component: 'DB' }, 'Migration successful: "type" column added.');
             });
+        }
+    });
+
+    // --- Migration: Add robustness columns to 'trades' if missing ---
+    db.all("PRAGMA table_info(trades)", (err, rows) => {
+        if (err) return logger.error({ component: 'DB' }, `Schema check failed: ${err.message}`);
+        
+        const colsToAdd = [
+            { name: 'last_error', type: 'TEXT' },
+            { name: 'sell_attempts', type: 'INTEGER DEFAULT 0' },
+            { name: 'last_sell_attempt_at', type: 'DATETIME' }
+        ];
+
+        for (const col of colsToAdd) {
+            if (!rows.some(r => r.name === col.name)) {
+                logger.info({ component: 'DB' }, `Migrating: Adding "${col.name}" column to "trades" table...`);
+                db.run(`ALTER TABLE trades ADD COLUMN ${col.name} ${col.type}`, (err) => {
+                    if (err) logger.error({ component: 'DB' }, `Migration failed (${col.name}): ${err.message}`);
+                    else logger.info({ component: 'DB' }, `Migration successful: "${col.name}" column added.`);
+                });
+            }
         }
     });
 });
@@ -210,7 +253,7 @@ function getWallets() {
 }
 
 async function addWallet(address, label, chain = 'solana') {
-    console.log(`[DB] Ajout du wallet: ${address} (${label || 'Sans label'})`);
+    logger.info({ component: 'DB' }, `Ajout du wallet: ${address} (${label || 'Sans label'})`);
     const result = await run(
         'INSERT INTO wallets (address, label, chain) VALUES (?, ?, ?)',
         [address, label ?? null, chain]
@@ -219,14 +262,14 @@ async function addWallet(address, label, chain = 'solana') {
 }
 
 function deleteWallet(id) {
-    console.log(`[DB] Suppression du wallet ID: ${id}`);
+    logger.info({ component: 'DB' }, `Suppression du wallet ID: ${id}`);
     return run('DELETE FROM wallets WHERE id = ?', [id]);
 }
 
 // ─── Detections ──────────────────────────────────────────────────────────────
 
 function logDetection(walletAddress, tokenAddress, txHash, blockNumber, type = 'unknown') {
-    console.log(`[DB] Log détection: ${type} | Token: ${tokenAddress.slice(0, 8)}... | Wallet: ${walletAddress.slice(0, 8)}...`);
+    logger.info({ component: 'DB' }, `Log détection: ${type} | Token: ${tokenAddress.slice(0, 8)}... | Wallet: ${walletAddress.slice(0, 8)}...`);
     return run(
         `INSERT OR IGNORE INTO detections (wallet_address, token_address, tx_hash, block_number, type)
          VALUES (?, ?, ?, ?, ?)`,
@@ -356,10 +399,48 @@ function closeTrade(id, sellTxHash, sellPriceUsd, reason) {
          current_price = ?, pnl_pct = CASE
              WHEN entry_price_usd > 0 THEN ((? - entry_price_usd) / entry_price_usd) * 100
              ELSE 0
-         END
+         END,
+         last_error = NULL
          WHERE id = ?`,
         [sellTxHash, sellPriceUsd, reason, sellPriceUsd, sellPriceUsd, id]
     );
+}
+
+/**
+ * Record an error or failed attempt for a trade.
+ */
+function updateTradeError(id, errorMsg) {
+    return run(
+        'UPDATE trades SET last_error = ?, status = CASE WHEN status = "PENDING" THEN "BUY_FAILED" ELSE status END WHERE id = ?',
+        [errorMsg, id]
+    );
+}
+
+/**
+ * Increment sell attempts counter.
+ */
+function incrementSellAttempts(id) {
+    return run(
+        'UPDATE trades SET sell_attempts = sell_attempts + 1, last_sell_attempt_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [id]
+    );
+}
+
+/**
+ * Log an audit event for a trade.
+ */
+function logTradeEvent(tradeId, type, msg, meta = null) {
+    return run(
+        'INSERT INTO trade_events (trade_id, type, msg, meta) VALUES (?, ?, ?, ?)',
+        [tradeId, type, msg, meta ? JSON.stringify(meta) : null]
+    );
+}
+
+/**
+ * Get events for a trade.
+ */
+function getTradeEvents(tradeId) {
+    return all('SELECT * FROM trade_events WHERE trade_id = ? ORDER BY timestamp DESC', [tradeId]);
 }
 
 /**
@@ -428,7 +509,7 @@ async function getCachedWalletTokens(walletAddress, maxAgeMs = 24 * 60 * 60 * 10
         [walletAddress]
     );
     if (rows.length === 0) {
-        console.log(`[DB Cache] Aucun token trouvé pour ${walletAddress}`);
+        logger.debug({ component: 'DB Cache' }, `Aucun token trouvé pour ${walletAddress}`);
         return null;
     }
 
@@ -439,7 +520,7 @@ async function getCachedWalletTokens(walletAddress, maxAgeMs = 24 * 60 * 60 * 10
     const age = Date.now() - newest;
 
     if (age > maxAgeMs) {
-        console.log(`[DB Cache] Cache trop vieux pour ${walletAddress} (${Math.round(age / 1000 / 60)} min)`);
+        logger.debug({ component: 'DB Cache' }, `Cache trop vieux pour ${walletAddress} (${Math.round(age / 1000 / 60)} min)`);
         return null;
     }
 
@@ -455,7 +536,7 @@ async function getCachedWalletTokens(walletAddress, maxAgeMs = 24 * 60 * 60 * 10
  * Uses INSERT OR REPLACE to upsert (update if wallet+mint already exists).
  */
 async function saveWalletTokens(walletAddress, enrichedTokens) {
-    console.log(`[DB Cache] Mise en cache de ${enrichedTokens.length} tokens pour ${walletAddress}`);
+    logger.debug({ component: 'DB Cache' }, `Mise en cache de ${enrichedTokens.length} tokens pour ${walletAddress}`);
     for (const t of enrichedTokens) {
         await run(
             `INSERT OR REPLACE INTO wallet_tokens
@@ -534,6 +615,10 @@ module.exports = {
     hasOpenTradeForToken,
     getTradeById,
     getTradeStats,
+    updateTradeError,
+    incrementSellAttempts,
+    logTradeEvent,
+    getTradeEvents,
 
     // Wallet Token Cache
     getCachedWalletTokens,

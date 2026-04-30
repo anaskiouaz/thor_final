@@ -16,6 +16,7 @@ const {
 const BN = require('bn.js');
 const axios = require('axios');
 const config = require('./config');
+const logger = require('./lib/logger');
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -47,7 +48,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function swapViaJupiter(inputMint, outputMint, amount, wallet, connection, priorityFeeLamports = 0) {
     const { slippageBps } = config.getTradingConfig();
 
-    console.log(`[Raydium/Jupiter] 🔄 Swap ${inputMint.slice(0, 8)}... → ${outputMint.slice(0, 8)}... (${amount})`);
+    logger.info({ component: 'Raydium/Jupiter' }, `🔄 Swap ${inputMint.slice(0, 8)}... → ${outputMint.slice(0, 8)}... (${amount})`);
 
     // 1. Get quote
     const { data: quoteData } = await axios.get(`${JUPITER_QUOTE_API}/quote`, {
@@ -64,7 +65,7 @@ async function swapViaJupiter(inputMint, outputMint, amount, wallet, connection,
 
     if (!quoteData || !quoteData.outAmount) {
         // Retry without DEX filter
-        console.log('[Raydium/Jupiter] No Raydium route, trying all DEXes...');
+        logger.debug({ component: 'Raydium/Jupiter' }, 'No Raydium route, trying all DEXes...');
         const { data: fallbackQuote } = await axios.get(`${JUPITER_QUOTE_API}/quote`, {
             params: {
                 inputMint,
@@ -120,14 +121,14 @@ async function executeJupiterSwap(quoteResponse, wallet, connection, priorityFee
         maxRetries: 3,
     });
 
-    console.log(`[Raydium/Jupiter] 📤 TX sent: ${txHash}`);
+    logger.info({ component: 'Raydium/Jupiter', txHash }, `📤 TX sent: ${txHash}`);
 
     // Confirm
     try {
         await connection.confirmTransaction(txHash, 'confirmed');
-        console.log(`[Raydium/Jupiter] ✅ TX confirmed: ${txHash}`);
+        logger.info({ component: 'Raydium/Jupiter', txHash }, `✅ TX confirmed: ${txHash}`);
     } catch (err) {
-        console.warn(`[Raydium/Jupiter] ⚠️ Confirmation timeout: ${err.message}`);
+        logger.warn({ component: 'Raydium/Jupiter', txHash }, `⚠️ Confirmation timeout: ${err.message}`);
     }
 
     return {

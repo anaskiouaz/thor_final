@@ -16,6 +16,7 @@ const telegram = require('./telegram');
 const config = require('./config');
 const trading = require('./trading');
 const autosell = require('./autosell');
+const logger = require('./lib/logger');
 require('dotenv').config();
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -43,12 +44,6 @@ const DEX_PROGRAMS = new Set([
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Returns a formatted timestamp string for logs: [HH:MM:SS.mmm] */
-function ts() {
-    const now = new Date();
-    return `[${now.toLocaleTimeString('fr-FR', { hour12: false })}.${String(now.getMilliseconds()).padStart(3, '0')}]`;
-}
-
 function isSolanaAddress(addr) {
     return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr);
 }
@@ -69,7 +64,7 @@ async function fetchJSON(url, options = {}, timeoutMs = 10_000) {
 /** Appel Helius JSON-RPC avec failover */
 async function heliusRpc(method, params) {
     const { rpcUrl } = config.getHeliusConfig();
-    console.log(`${ts()} [API] Helius RPC call: ${method}`);
+    logger.debug({ component: 'API' }, `Helius RPC call: ${method}`);
 
     try {
         const data = await fetchJSON(rpcUrl, {
@@ -104,7 +99,7 @@ async function heliusRpc(method, params) {
 async function getLastPurchasedTokens(walletAddress, limit = 10) {
     // ── Stratégie 1 : Solscan defi activities ────────────────────────────────
     if (process.env.SOLSCAN_API_KEY) {
-        console.log(`${ts()} [API] Tentative Solscan pour ${walletAddress}...`);
+        logger.info({ component: 'API' }, `Tentative Solscan pour ${walletAddress}...`);
         try {
             const data = await fetchJSON(
                 `${SOLSCAN_API}/account/defi/activities?` +
@@ -144,7 +139,7 @@ async function getLastPurchasedTokens(walletAddress, limit = 10) {
             }
 
             if (tokens.length > 0) {
-                console.log(`${ts()} [Server] Solscan: ${tokens.length} tokens trouvés pour ${walletAddress}`);
+                logger.info({ component: 'Server' }, `Solscan: ${tokens.length} tokens trouvés pour ${walletAddress}`);
                 return tokens.slice(0, limit);
             }
         } catch (err) {
@@ -157,7 +152,7 @@ async function getLastPurchasedTokens(walletAddress, limit = 10) {
     // ── Stratégie 2 : Helius Enhanced Transactions ───────────────────────────
     const { txUrl } = config.getHeliusConfig();
     if (txUrl) {
-        console.log(`${ts()} [API] Tentative Helius Enhanced pour ${walletAddress}...`);
+        logger.info({ component: 'API' }, `Tentative Helius Enhanced pour ${walletAddress}...`);
         try {
             // Reconstruct the URL using the base txUrl from config
             const baseUrl = txUrl.split('?')[0].replace('/v0/transactions', `/v0/addresses/${walletAddress}/transactions`);
@@ -188,7 +183,7 @@ async function getLastPurchasedTokens(walletAddress, limit = 10) {
             }
 
             if (tokens.length > 0) {
-                console.log(`${ts()} [Server] Helius Enhanced: ${tokens.length} tokens pour ${walletAddress}`);
+                logger.info({ component: 'Server' }, `Helius Enhanced: ${tokens.length} tokens pour ${walletAddress}`);
                 return tokens.slice(0, limit);
             }
         } catch (err) {
@@ -197,7 +192,7 @@ async function getLastPurchasedTokens(walletAddress, limit = 10) {
     }
 
     // ── Stratégie 3 : Scan manuel signatures Helius RPC ─────────────────────
-    console.log(`${ts()} [Server] Fallback: scan signatures pour ${walletAddress}`);
+    logger.info({ component: 'Server' }, `Fallback: scan signatures pour ${walletAddress}`);
     const seen = new Set();
     const tokens = [];
 
@@ -265,7 +260,7 @@ async function getLastPurchasedTokens(walletAddress, limit = 10) {
  * Enrichit un token avec son prix via DexScreener (gratuit, pas de clé).
  */
 async function enrichToken(tokenData) {
-    console.log(`${ts()} [API] Enrichissement token: ${tokenData.symbol || '???'} (${tokenData.mint.slice(0, 8)}...) via DexScreener`);
+    logger.info({ component: 'API' }, `Enrichissement token: ${tokenData.symbol || '???'} (${tokenData.mint.slice(0, 8)}...) via DexScreener`);
     try {
         const data = await fetchJSON(
             `https://api.dexscreener.com/latest/dex/tokens/${tokenData.mint}`,
@@ -305,11 +300,11 @@ const wsClients = new Set();
 
 wss.on('connection', (ws) => {
     wsClients.add(ws);
-    console.log(`${ts()} [WS] Client connected (${wsClients.size} total)`);
+    logger.info({ component: 'WS' }, `Client connected (${wsClients.size} total)`);
 
     ws.on('close', () => {
         wsClients.delete(ws);
-        console.log(`${ts()} [WS] Client disconnected (${wsClients.size} total)`);
+        logger.info({ component: 'WS' }, `Client disconnected (${wsClients.size} total)`);
     });
 
     ws.on('error', () => {
@@ -365,7 +360,7 @@ app.post('/api/wallets', async (req, res) => {
         if (err.message.includes('UNIQUE')) {
             return res.status(409).json({ error: 'Wallet déjà surveillé.' });
         }
-        console.error('[Server] addWallet error:', err);
+        logger.error({ component: 'Server' }, `addWallet error: ${err.message}`, { stack: err.stack });
         res.status(500).json({ error: err.message });
     }
 });
@@ -466,7 +461,7 @@ app.get('/api/wallets/:address/tokens', async (req, res) => {
     try {
         const dbCached = await db.getCachedWalletTokens(address, DB_CACHE_TTL_MS);
         if (dbCached && dbCached.length > 0) {
-            console.log(`${ts()} [Server] ✅ DB CACHE HIT pour ${address} (${dbCached.length} tokens) - Pas de requête API nécessaire.`);
+            logger.info({ component: 'Server' }, `✅ DB CACHE HIT pour ${address} (${dbCached.length} tokens) - Pas de requête API nécessaire.`);
             const responseData = {
                 wallet: address,
                 chain: 'solana',
@@ -478,7 +473,7 @@ app.get('/api/wallets/:address/tokens', async (req, res) => {
             walletCache.set(address, { data: responseData, timestamp: Date.now() });
             return res.json(responseData);
         } else {
-            console.log(`${ts()} [Server] ❌ DB CACHE MISS pour ${address} - Lancement d'une requête API fraîche...`);
+            logger.info({ component: 'Server' }, `❌ DB CACHE MISS pour ${address} - Lancement d'une requête API fraîche...`);
         }
     } catch (err) {
         console.warn('[Server] DB cache check failed:', err.message);
@@ -499,7 +494,7 @@ app.get('/api/wallets/:address/tokens', async (req, res) => {
         // 3. Sauvegarder en DB pour le cache 24h
         try {
             await db.saveWalletTokens(address, enriched);
-            console.log(`${ts()} [Server] 💾 ${enriched.length} tokens sauvegardés en DB pour ${address}`);
+            logger.info({ component: 'Server' }, `💾 ${enriched.length} tokens sauvegardés en DB pour ${address}`);
         } catch (err) {
             console.warn('[Server] DB save failed:', err.message);
         }
@@ -517,7 +512,7 @@ app.get('/api/wallets/:address/tokens', async (req, res) => {
         res.json(responseData);
 
     } catch (err) {
-        console.error(`[Server] /tokens error pour ${address}:`, err.message);
+        logger.error({ component: 'Server' }, `/tokens error pour ${address}: ${err.message}`);
         res.status(500).json({ error: 'Impossible de récupérer les tokens', detail: err.message });
     }
 });
@@ -542,7 +537,7 @@ app.get('/api/wallets/:address/detail', async (req, res) => {
         const balResult = await heliusRpc('getBalance', [address, { commitment: 'confirmed' }]);
         data.balance = (balResult?.value ?? 0) / 1e9;
     } catch (err) {
-        console.warn('[Server] getBalance failed:', err.message);
+        logger.warn({ component: 'Server' }, `getBalance failed: ${err.message}`);
     }
 
     try {
@@ -564,7 +559,7 @@ app.get('/api/wallets/:address/detail', async (req, res) => {
             }
         }
     } catch (err) {
-        console.warn('[Server] collectTokens failed:', err.message);
+        logger.warn({ component: 'Server' }, `collectTokens failed: ${err.message}`);
     }
 
     walletCache.set(`detail:${address}`, { data, timestamp: Date.now() });
@@ -580,7 +575,7 @@ app.post('/api/wallets/:address/refresh', async (req, res) => {
     try {
         await db.clearWalletTokenCache(address);
     } catch (err) {
-        console.warn('[Server] clearWalletTokenCache failed:', err.message);
+        logger.warn({ component: 'Server' }, `clearWalletTokenCache failed: ${err.message}`);
     }
     res.json({ success: true, message: 'Cache invalidé (mémoire + DB)' });
 });
@@ -588,19 +583,19 @@ app.post('/api/wallets/:address/refresh', async (req, res) => {
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n${ts()} [Server] 🚀 Thor v2 — http://0.0.0.0:${PORT}`);
-    console.log(`${ts()} [Server] 🔌 WebSocket — ws://0.0.0.0:${PORT}/ws`);
+    logger.info({ component: 'Server' }, `🚀 Thor v2 — http://0.0.0.0:${PORT}`);
+    logger.info({ component: 'Server' }, `🔌 WebSocket — ws://0.0.0.0:${PORT}/ws`);
 
     const tradingConfig = config.getTradingConfig();
-    console.log(`${ts()} [Server] ⚡ Auto-buy: ${tradingConfig.autoBuyEnabled ? 'ON' : 'OFF'} | Dry run: ${tradingConfig.dryRun ? 'YES' : 'NO'}`);
-    console.log(`${ts()} [Server] 💰 Buy amount: ${tradingConfig.buyAmountEur}€ | Slippage: ${tradingConfig.slippageBps / 100}%`);
-    console.log(`${ts()} [Server] 🎯 TP: +${tradingConfig.tpPercent}% | SL: ${tradingConfig.slPercent}%\n`);
+    logger.info({ component: 'Server' }, `⚡ Auto-buy: ${tradingConfig.autoBuyEnabled ? 'ON' : 'OFF'} | Dry run: ${tradingConfig.dryRun ? 'YES' : 'NO'}`);
+    logger.info({ component: 'Server' }, `💰 Buy amount: ${tradingConfig.buyAmountEur}€ | Slippage: ${tradingConfig.slippageBps / 100}%`);
+    logger.info({ component: 'Server' }, `🎯 TP: +${tradingConfig.tpPercent}% | SL: ${tradingConfig.slPercent}%`);
 
     if (!process.env.HELIUS_API_KEY) {
-        console.warn('[Server] ⚠ HELIUS_API_KEY manquant — fonctionnalités limitées');
+        logger.warn({ component: 'Server' }, '⚠ HELIUS_API_KEY manquant — fonctionnalités limitées');
     }
     if (!process.env.SOLSCAN_API_KEY) {
-        console.warn('[Server] ⚠ SOLSCAN_API_KEY manquant — fallback Helius utilisé');
+        logger.warn({ component: 'Server' }, '⚠ SOLSCAN_API_KEY manquant — fallback Helius utilisé');
     }
 
     monitor.start();

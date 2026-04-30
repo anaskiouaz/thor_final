@@ -1,5 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
 const trading = require('./trading'); // We'll need this to trigger buys
+const logger = require('./lib/logger');
 require('dotenv').config();
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -10,7 +11,7 @@ let bot = null;
 if (token && chatId) {
     // Enable polling so the bot can receive messages
     bot = new TelegramBot(token, { polling: true });
-    console.log('[Telegram] Bot initialized with polling.');
+    logger.info({ component: 'Telegram' }, 'Bot initialized with polling.');
 
     // Handle /buy [tokenAddress] [amount?]
     bot.onText(/\/buy (.+)/, async (msg, match) => {
@@ -40,16 +41,16 @@ if (token && chatId) {
     });
 
 } else {
-    console.warn('[Telegram] WARNING: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing in .env');
+    logger.warn({ component: 'Telegram' }, 'TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing in .env');
 }
 
 const sendMessage = async (message) => {
     if (!bot || !chatId) return;
     try {
         await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-        console.log('[Telegram] Message sent.');
+        logger.debug({ component: 'Telegram' }, 'Message sent.');
     } catch (err) {
-        console.error('[Telegram] Error sending message:', err.message);
+        logger.error({ component: 'Telegram' }, `Error sending message: ${err.message}`);
     }
 };
 

@@ -15,6 +15,7 @@ const {
 } = require('@solana/web3.js');
 const BN = require('bn.js');
 const config = require('./config');
+const logger = require('./lib/logger');
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -34,12 +35,6 @@ const PUMP_API_BASE = 'https://frontend-api-v3.pump.fun';
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/** Returns a formatted timestamp string for logs: [HH:MM:SS.mmm] */
-function ts() {
-    const now = new Date();
-    return `[${now.toLocaleTimeString('fr-FR', { hour12: false })}.${String(now.getMilliseconds()).padStart(3, '0')}]`;
-}
 
 async function fetchJSON(url, options = {}, timeoutMs = 10_000) {
     const res = await fetch(url, {
@@ -97,7 +92,7 @@ async function isPumpFunToken(mintAddress) {
         return { onCurve: false, data };
     } catch (err) {
         // API error — token may not exist on Pump.fun
-        console.warn(`${ts()} [PumpFun] API check failed for ${mintAddress}: ${err.message}`);
+        logger.warn({ component: 'PumpFun' }, `API check failed for ${mintAddress}: ${err.message}`);
         return { onCurve: false, data: null };
     }
 }
@@ -140,7 +135,7 @@ async function buyOnBondingCurve(mintAddress, solAmount, wallet, connection, pri
     const mint = new PublicKey(mintAddress);
     const { slippageBps } = config.getTradingConfig();
     
-    console.log(`${ts()} [PumpFun] 🎯 Buying ${solAmount} SOL of ${mintAddress} on bonding curve...`);
+    logger.info({ component: 'PumpFun', token: mintAddress }, `🎯 Buying ${solAmount} SOL on bonding curve...`);
 
     // 1. Get token info from Pump.fun API
     const { onCurve, data: tokenData } = await isPumpFunToken(mintAddress);
@@ -250,7 +245,7 @@ async function buyOnBondingCurve(mintAddress, solAmount, wallet, connection, pri
         maxRetries: 3,
     });
 
-    console.log(`${ts()} [PumpFun] 📤 TX sent: ${txHash}`);
+    logger.info({ component: 'PumpFun', token: mintAddress, txHash }, `📤 TX sent: ${txHash}`);
 
     // Wait for confirmation with timeout
     try {
@@ -258,9 +253,9 @@ async function buyOnBondingCurve(mintAddress, solAmount, wallet, connection, pri
             { signature: txHash, blockhash, lastValidBlockHeight },
             'confirmed'
         );
-        console.log(`${ts()} [PumpFun] ✅ TX confirmed: ${txHash}`);
+        logger.info({ component: 'PumpFun', token: mintAddress, txHash }, `✅ TX confirmed: ${txHash}`);
     } catch (err) {
-        console.warn(`${ts()} [PumpFun] ⚠️ Confirmation timeout, TX may still succeed: ${err.message}`);
+        logger.warn({ component: 'PumpFun', token: mintAddress, txHash }, `⚠️ Confirmation timeout: ${err.message}`);
     }
 
     // 7. Get actual tokens received from the transaction
@@ -286,7 +281,7 @@ async function buyOnBondingCurve(mintAddress, solAmount, wallet, connection, pri
             }
         }
     } catch (err) {
-        console.warn(`${ts()} [PumpFun] Could not verify tokens received: ${err.message}`);
+        logger.warn({ component: 'PumpFun', token: mintAddress }, `Could not verify tokens received: ${err.message}`);
     }
 
     return { txHash, tokensReceived };
@@ -299,7 +294,7 @@ async function sellOnBondingCurve(mintAddress, tokenAmount, wallet, connection, 
     const mint = new PublicKey(mintAddress);
     const { slippageBps } = config.getTradingConfig();
 
-    console.log(`${ts()} [PumpFun] 📤 Selling ${tokenAmount} tokens of ${mintAddress} on bonding curve...`);
+    logger.info({ component: 'PumpFun', token: mintAddress }, `📤 Selling ${tokenAmount} tokens on bonding curve...`);
 
     const programId = PUMP_FUN_PROGRAM;
     const bondingCurve = getBondingCurvePDA(mint, programId);
@@ -366,16 +361,16 @@ async function sellOnBondingCurve(mintAddress, tokenAmount, wallet, connection, 
         maxRetries: 3,
     });
 
-    console.log(`${ts()} [PumpFun] 📤 Sell TX sent: ${txHash}`);
+    logger.info({ component: 'PumpFun', token: mintAddress, txHash }, `📤 Sell TX sent: ${txHash}`);
 
     try {
         await connection.confirmTransaction(
             { signature: txHash, blockhash, lastValidBlockHeight },
             'confirmed'
         );
-        console.log(`${ts()} [PumpFun] ✅ Sell TX confirmed: ${txHash}`);
+        logger.info({ component: 'PumpFun', token: mintAddress, txHash }, `✅ Sell TX confirmed: ${txHash}`);
     } catch (err) {
-        console.warn(`${ts()} [PumpFun] ⚠️ Sell confirmation timeout: ${err.message}`);
+        logger.warn({ component: 'PumpFun', token: mintAddress, txHash }, `⚠️ Sell confirmation timeout: ${err.message}`);
     }
 
     return { txHash };

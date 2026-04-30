@@ -9,6 +9,7 @@ const db = require('./database');
 const trading = require('./trading');
 const config = require('./config');
 const telegram = require('./telegram');
+const logger = require('./lib/logger');
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -19,17 +20,13 @@ const BATCH_SIZE = 5;               // Max concurrent price fetches
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Returns a formatted timestamp string for logs: [HH:MM:SS.mmm] */
-function ts() {
-    const now = new Date();
-    return `[${now.toLocaleTimeString('fr-FR', { hour12: false })}.${String(now.getMilliseconds()).padStart(3, '0')}]`;
-}
 
 // ─── AutoSellEngine ──────────────────────────────────────────────────────────
 
 class AutoSellEngine {
     constructor() {
         this.isRunning = false;
+        this.slBreaches = new Map(); // tradeId -> count
     }
 
     /**
@@ -40,10 +37,10 @@ class AutoSellEngine {
         this.isRunning = true;
 
         const tradingConfig = config.getTradingConfig();
-        console.log(`${ts()} [AutoSell] ✅ Engine started`);
-        console.log(`${ts()} [AutoSell]    TP: +${tradingConfig.tpPercent}% | SL: ${tradingConfig.slPercent}%`);
-        console.log(`${ts()} [AutoSell]    Check interval: ${CHECK_INTERVAL_MS / 1000}s`);
-        console.log(`${ts()} [AutoSell]    Dry run: ${tradingConfig.dryRun ? 'YES' : 'NO'}`);
+        logger.info({ component: 'AutoSell' }, '✅ Engine started');
+        logger.info({ component: 'AutoSell' }, `TP: +${tradingConfig.tpPercent}% | SL: ${tradingConfig.slPercent}%`);
+        logger.info({ component: 'AutoSell' }, `Check interval: ${CHECK_INTERVAL_MS / 1000}s`);
+        logger.info({ component: 'AutoSell' }, `Dry run: ${tradingConfig.dryRun ? 'YES' : 'NO'}`);
 
         this._loop();
     }
@@ -53,7 +50,7 @@ class AutoSellEngine {
      */
     stop() {
         this.isRunning = false;
-        console.log(`${ts()} [AutoSell] 🛑 Engine stopped.`);
+        logger.info({ component: 'AutoSell' }, '🛑 Engine stopped.');
     }
 
     // ── Private ──────────────────────────────────────────────────────────────
@@ -63,7 +60,7 @@ class AutoSellEngine {
             try {
                 await this._checkOpenTrades();
             } catch (err) {
-                console.error(`${ts()} [AutoSell] Loop error:`, err.message);
+                logger.error({ component: 'AutoSell' }, `Loop error: ${err.message}`, { stack: err.stack });
             }
             await sleep(CHECK_INTERVAL_MS);
         }
@@ -100,7 +97,7 @@ class AutoSellEngine {
             // Get current price
             const currentPrice = await trading.getPrice(trade.token_address);
             if (currentPrice <= 0) {
-                console.warn(`${ts()} [AutoSell] ⚠️ No price for trade #${trade.id} (${trade.token_symbol || trade.token_address.slice(0, 8)}) — skipping`);
+                logger.warn({ component: 'AutoSell', tradeId: trade.id }, `⚠️ No price for trade #${trade.id} (${trade.token_symbol || trade.token_address.slice(0, 8)}) — skipping`);
                 return;
             }
 
@@ -130,26 +127,40 @@ class AutoSellEngine {
 
             // ── Check Take Profit ────────────────────────────────────────
             if (pnlPct >= tradingConfig.tpPercent) {
-                console.log(`${ts()} [AutoSell] 💰 TP triggered for trade #${trade.id}: ${pnlPct.toFixed(2)}% >= +${tradingConfig.tpPercent}%`);
+                logger.info({ component: 'AutoSell', tradeId: trade.id }, `💰 TP triggered: ${pnlPct.toFixed(2)}% >= +${tradingConfig.tpPercent}%`);
                 await trading.sellTrade(trade, 'TP');
                 return;
             }
 
             // ── Check Stop Loss ──────────────────────────────────────────
             if (pnlPct <= tradingConfig.slPercent) {
-                console.log(`${ts()} [AutoSell] 🛑 SL triggered for trade #${trade.id}: ${pnlPct.toFixed(2)}% <= ${tradingConfig.slPercent}%`);
-                await trading.sellTrade(trade, 'SL');
-                return;
+                const breachCount = (this.slBreaches.get(trade.id) || 0) + 1;
+                this.slBreaches.set(trade.id, breachCount);
+
+                if (breachCount >= 2) {
+                    logger.info({ component: 'AutoSell', tradeId: trade.id }, `🛑 SL confirmed (2/2): ${pnlPct.toFixed(2)}% <= ${tradingConfig.slPercent}%`);
+                    this.slBreaches.delete(trade.id);
+                    await trading.sellTrade(trade, 'SL');
+                    return;
+                } else {
+                    logger.warn({ component: 'AutoSell', tradeId: trade.id }, `⚠️ SL alert (1/2): ${pnlPct.toFixed(2)}% — Awaiting confirmation...`);
+                }
+            } else {
+                // Reset breach if price recovers
+                if (this.slBreaches.has(trade.id)) {
+                    logger.info({ component: 'AutoSell', tradeId: trade.id }, `✅ SL recovered for trade #${trade.id}`);
+                    this.slBreaches.delete(trade.id);
+                }
             }
 
             // Log position status (only for significant positions)
             if (Math.abs(pnlPct) > 10) {
                 const emoji = pnlPct >= 0 ? '📈' : '📉';
-                console.log(`${ts()} [AutoSell] ${emoji} Trade #${trade.id} ${trade.token_symbol || trade.token_address.slice(0, 8)}: ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% | Price: $${currentPrice.toFixed(10)} | ATH: $${(Math.max(currentPrice, trade.ath_usd || 0)).toFixed(10)}`);
+                logger.info({ component: 'AutoSell', tradeId: trade.id }, `${emoji} ${trade.token_symbol || trade.token_address.slice(0, 8)}: ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% | Price: $${currentPrice.toFixed(10)} | ATH: $${(Math.max(currentPrice, trade.ath_usd || 0)).toFixed(10)}`);
             }
 
         } catch (err) {
-            console.error(`${ts()} [AutoSell] Error evaluating trade #${trade.id}:`, err.message);
+            logger.error({ component: 'AutoSell', tradeId: trade.id }, `Error evaluating trade: ${err.message}`, { stack: err.stack });
         }
     }
 }

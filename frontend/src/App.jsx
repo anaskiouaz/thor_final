@@ -55,11 +55,18 @@ function getStatusBadge(trade) {
 
 function getStatusLabel(trade) {
   if (trade.status === 'OPEN') return 'OPEN';
-  if (trade.status === 'PENDING') return 'PENDING';
+  if (trade.status === 'PENDING') return 'PENDING...';
+  if (trade.status === 'BUY_FAILED') return 'BUY FAILED';
   if (trade.sell_reason === 'TP') return 'TP ✓';
   if (trade.sell_reason === 'SL') return 'SL ✗';
-  if (trade.sell_reason === 'BUY_FAILED') return 'FAILED';
-  return 'CLOSED';
+  return trade.sell_reason || 'CLOSED';
+}
+
+function formatMC(val) {
+  if (!val || val === 0) return '—';
+  if (val >= 1000000) return `$${(val / 1000000).toFixed(1)}M`;
+  if (val >= 1000) return `$${(val / 1000).toFixed(1)}K`;
+  return `$${val.toFixed(0)}`;
 }
 
 // ─── CopyableAddress ─────────────────────────────────────────────────────────
@@ -124,6 +131,14 @@ const TradeRow = ({ trade, index }) => {
                 className="text-slate-600 hover:text-indigo-400 transition-colors">
                 <ExternalLink className="w-3 h-3" />
               </a>
+              {trade.last_error && (
+                <div className="group/err relative">
+                  <AlertTriangle className="w-3 h-3 text-red-400 cursor-help" />
+                  <div className="absolute bottom-full left-0 mb-2 w-48 p-2 bg-red-900/90 text-white text-[10px] rounded border border-red-500/30 opacity-0 group-hover/err:opacity-100 transition-opacity z-50 pointer-events-none">
+                    {trade.last_error}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -142,6 +157,7 @@ const TradeRow = ({ trade, index }) => {
         <span className={`text-sm font-mono font-medium ${isOpen ? 'text-white' : 'text-slate-400'}`}>
           {formatPrice(trade.current_price || trade.sell_price_usd || entryPrice)}
         </span>
+        <p className="text-[10px] text-slate-500 mt-0.5">MC: {formatMC(trade.current_mc || trade.buy_mc || trade.marketCap)}</p>
       </td>
 
       {/* ATH */}
@@ -175,10 +191,23 @@ const TradeRow = ({ trade, index }) => {
 
       {/* Status */}
       <td className="py-3 px-4 text-center">
-        <span className={`badge ${getStatusBadge(trade)}`}>
-          {isOpen && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />}
-          {getStatusLabel(trade)}
-        </span>
+        <div className="flex flex-col items-center gap-1">
+          <span className={`badge ${getStatusBadge(trade)}`}>
+            {isOpen && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />}
+            {getStatusLabel(trade)}
+          </span>
+          {isOpen && (
+            <button
+              onClick={() => { if (confirm('Vendre cette position ?')) api.sellTrade(trade.id); }}
+              className="text-[10px] text-indigo-400 hover:text-white hover:underline transition-colors"
+            >
+              Vendre manuel
+            </button>
+          )}
+          {trade.sell_attempts > 0 && trade.status !== 'CLOSED' && (
+            <span className="text-[9px] text-amber-500">Retry {trade.sell_attempts}x</span>
+          )}
+        </div>
       </td>
 
       {/* Time */}
@@ -521,11 +550,10 @@ export default function App() {
               </div>
             )}
 
-            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-medium ${
-              isConnected
-                ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
-                : 'border-red-500/20 bg-red-500/10 text-red-400'
-            }`}>
+            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-medium ${isConnected
+              ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400'
+              : 'border-red-500/20 bg-red-500/10 text-red-400'
+              }`}>
               <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-red-400'}`} />
               {isConnected ? 'Live' : 'Offline'}
             </div>
