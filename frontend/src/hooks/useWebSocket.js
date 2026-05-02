@@ -3,8 +3,9 @@
  */
 
 import { useEffect, useRef, useCallback, useState } from 'react';
+import { getSessionPort } from '../lib/session';
 
-const WS_URL = 'ws://' + window.location.hostname + ':3000/ws';
+const WS_URL = `ws://${window.location.hostname}:${getSessionPort()}/ws`;
 
 export function useWebSocket(onMessage) {
     const wsRef = useRef(null);

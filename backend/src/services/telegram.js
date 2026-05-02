@@ -1,6 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
-const trading = require('./trading');
-const logger = require('../../utils/logger');
+const logger = require('../utils/logger');
 require('dotenv').config();
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -25,6 +24,7 @@ if (token && chatId) {
         await bot.sendMessage(chatId, `⏳ *Initiating Buy...*\nToken: \`${tokenAddress}\`\nAmount: ${amount || 'Default'} SOL`);
 
         try {
+            const trading = require('./trading');
             const txid = await trading.buyToken(tokenAddress, amount);
             await bot.sendMessage(chatId, `✅ *Buy Executed!*\nTX: [View on Solscan](https://solscan.io/tx/${txid})\nAuto-sell target: +100%`, { parse_mode: 'Markdown' });
         } catch (err) {
@@ -45,7 +45,9 @@ if (token && chatId) {
 const sendMessage = async (message) => {
     if (!bot || !chatId) return;
     try {
-        await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+        const prefix = process.env.APP_MODE === 'REAL' ? '[RÉEL] 🟢 ' : '[SIM] 🧪 ';
+        const fullMessage = prefix + message;
+        await bot.sendMessage(chatId, fullMessage, { parse_mode: 'Markdown' });
         logger.debug({ component: 'Telegram' }, 'Message sent.');
     } catch (err) {
         logger.error({ component: 'Telegram' }, `Error sending message: ${err.message}`);

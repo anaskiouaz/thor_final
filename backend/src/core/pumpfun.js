@@ -11,6 +11,7 @@ const {
 const BN = require('bn.js');
 const config = require('../config');
 const logger = require('../utils/logger');
+const jito = require('./jito');
 
 const PUMP_FUN_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
 const PUMP_FUN_FEE_ACCOUNT = new PublicKey('CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbCJ15mxWx7ENp');
@@ -53,8 +54,10 @@ async function getBondingCurvePrice(mintAddress) {
     } catch { return null; }
 }
 
-async function buyOnBondingCurve(mintAddress, solAmount, wallet, connection, priorityFeeLamports = 0) {
+async function buyOnBondingCurve(mintAddress, solAmount, wallet, connection, priorityFeeLamports = 0, options = {}) {
     const mint = new PublicKey(mintAddress);
+    const tradingConfig = config.getTradingConfig();
+    const useJito = options.forceJito || tradingConfig.useJito;
     const { slippageBps } = config.getTradingConfig();
     const { data: tokenData } = await isPumpFunToken(mintAddress);
     const bondingCurve = getBondingCurvePDA(mint);
@@ -81,13 +84,22 @@ async function buyOnBondingCurve(mintAddress, solAmount, wallet, connection, pri
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
     const transaction = new VersionedTransaction(new TransactionMessage({ payerKey: wallet.publicKey, recentBlockhash: blockhash, instructions }).compileToV0Message());
     transaction.sign([wallet]);
-    const txHash = await connection.sendRawTransaction(transaction.serialize(), { skipPreflight: true, maxRetries: 3 });
-    await connection.confirmTransaction({ signature: txHash, blockhash, lastValidBlockHeight }, 'confirmed');
+
+    let txHash;
+    if (useJito) {
+        logger.info({ component: 'PumpFun' }, `🛡️ Executing via Jito Bundle... ${options.customTip ? `(Tip: ${options.customTip} SOL)` : ''}`);
+        txHash = await jito.sendBundle([transaction], wallet, connection, options.customTip);
+    } else {
+        txHash = await connection.sendRawTransaction(transaction.serialize(), { skipPreflight: true, maxRetries: 3 });
+        await connection.confirmTransaction({ signature: txHash, blockhash, lastValidBlockHeight }, 'confirmed');
+    }
     return { txHash, tokensReceived: estimatedTokens.toString() };
 }
 
-async function sellOnBondingCurve(mintAddress, tokenAmount, wallet, connection, priorityFeeLamports = 0) {
+async function sellOnBondingCurve(mintAddress, tokenAmount, wallet, connection, priorityFeeLamports = 0, options = {}) {
     const mint = new PublicKey(mintAddress);
+    const tradingConfig = config.getTradingConfig();
+    const useJito = options.forceJito || tradingConfig.useJito;
     const bondingCurve = getBondingCurvePDA(mint);
     const bondingCurveATA = getAssociatedTokenAddress(mint, bondingCurve);
     const userATA = getAssociatedTokenAddress(mint, wallet.publicKey);
@@ -107,8 +119,15 @@ async function sellOnBondingCurve(mintAddress, tokenAmount, wallet, connection, 
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
     const transaction = new VersionedTransaction(new TransactionMessage({ payerKey: wallet.publicKey, recentBlockhash: blockhash, instructions }).compileToV0Message());
     transaction.sign([wallet]);
-    const txHash = await connection.sendRawTransaction(transaction.serialize(), { skipPreflight: true, maxRetries: 3 });
-    await connection.confirmTransaction({ signature: txHash, blockhash, lastValidBlockHeight }, 'confirmed');
+
+    let txHash;
+    if (useJito) {
+        logger.info({ component: 'PumpFun' }, `🛡️ Executing via Jito Bundle... ${options.customTip ? `(Tip: ${options.customTip} SOL)` : ''}`);
+        txHash = await jito.sendBundle([transaction], wallet, connection, options.customTip);
+    } else {
+        txHash = await connection.sendRawTransaction(transaction.serialize(), { skipPreflight: true, maxRetries: 3 });
+        await connection.confirmTransaction({ signature: txHash, blockhash, lastValidBlockHeight }, 'confirmed');
+    }
     return { txHash };
 }
 

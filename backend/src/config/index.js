@@ -39,19 +39,43 @@ function switchToBackup() {
     return false;
 }
 
-// ─── Trading Configuration ───────────────────────────────────────────────────
+let overrides = {};
 
 function getTradingConfig() {
     return {
-        buyAmountEur:       Number(process.env.BUY_AMOUNT_EUR ?? 8),
-        maxPriorityFeeEur:  Number(process.env.MAX_PRIORITY_FEE_EUR ?? 1),
-        slippageBps:        Number(process.env.SLIPPAGE_BPS ?? 8000),       // 80% — aggressive but with minimal protection
-        tpPercent:          Number(process.env.TP_PERCENT ?? 100),          // +100% take profit
-        slPercent:          Number(process.env.SL_PERCENT ?? -70),          // -70% stop loss
+        buyAmountEur:       overrides.buyAmountEur ?? Number(process.env.BUY_AMOUNT_EUR ?? 8),
+        maxPriorityFeeEur:  overrides.maxPriorityFeeEur ?? Number(process.env.MAX_PRIORITY_FEE_EUR ?? 1),
+        slippageBps:        overrides.slippageBps ?? Number(process.env.SLIPPAGE_BPS ?? 8000),       // 80% — aggressive but with minimal protection
+        tpPercent:          overrides.tpPercent ?? Number(process.env.TP_PERCENT ?? 100),          // +100% take profit
+        slPercent:          overrides.slPercent ?? Number(process.env.SL_PERCENT ?? -70),          // -70% stop loss
         entryPriceDelaySec: Number(process.env.ENTRY_PRICE_DELAY_SEC ?? 5),
-        autoBuyEnabled:     (process.env.AUTO_BUY_ENABLED ?? 'true') === 'true',
+        autoBuyEnabled:     overrides.autoBuyEnabled ?? (process.env.AUTO_BUY_ENABLED ?? 'true') === 'true',
         dryRun:             (process.env.DRY_RUN ?? 'false') === 'true',
         defaultBuyAmountSol: Number(process.env.DEFAULT_BUY_AMOUNT ?? 0.1),
+        trailingStopPercent: Number(process.env.TRAILING_STOP_PERCENT ?? 5), // 5% trailing stop
+        useJito:             (process.env.USE_JITO ?? 'false') === 'true',
+        jitoTipSol:          Number(process.env.JITO_TIP_SOL ?? 0.001),
+        priority_feeStrategy: process.env.PRIORITY_FEE_STRATEGY ?? 'aggressive', // aggressive, medium, safe
+        maxRiskScore:       Number(process.env.MAX_RISK_SCORE ?? 500),
+        blockMintAuthority: (process.env.BLOCK_MINT_AUTHORITY ?? 'true') === 'true',
+        blockFreezeAuthority: (process.env.BLOCK_FREEZE_AUTHORITY ?? 'true') === 'true',
+        maxTopHolderPct:      Number(process.env.MAX_TOP_HOLDER_PCT ?? 15),
+        minLpBurnedPct:       Number(process.env.MIN_LP_BURNED_PCT ?? 95),
+        blockMutableMetadata: (process.env.BLOCK_MUTABLE_METADATA ?? 'true') === 'true',
+        minLiquidityUsd:      Number(process.env.MIN_LIQUIDITY_USD ?? 1000),
+        rugPanicTipSol:       Number(process.env.RUG_PANIC_TIP_SOL ?? 0.005),
+        rugDropPercent:       Number(process.env.RUG_DROP_PERCENT ?? 40),
+        liquidityCheckInterval: Number(process.env.LIQUIDITY_CHECK_INTERVAL ?? 10000),
+        minMomentumVolume:    Number(process.env.MIN_MOMENTUM_VOLUME ?? 10),
+        enableStages: (process.env.ENABLE_STAGES ?? 'false') === 'true',
+        tp1Pnl: Number(process.env.TP1_PNL ?? 50),
+        tp1SellPct: Number(process.env.TP1_SELL_PCT ?? 50),
+        tp2Pnl: Number(process.env.TP2_PNL ?? 100),
+        tp2SellPct: Number(process.env.TP2_SELL_PCT ?? 25),
+        monitorWhales: (process.env.MONITOR_WHALES ?? 'true') === 'true',
+        whaleDumpThreshold: Number(process.env.WHALE_DUMP_THRESHOLD ?? 30),
+        autoExitOnWhaleDump: (process.env.AUTO_EXIT_ON_WHALE_DUMP ?? 'true') === 'true',
+        maxDailyLossSol: Number(process.env.MAX_DAILY_LOSS_SOL ?? 5.0), // Stop if loss exceeds 5 SOL/day
     };
 }
 
@@ -76,10 +100,25 @@ const ALL_DEX_PROGRAMS = new Set([
     'LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj',   // LaunchLab
 ]);
 
+function setDryRun(value) {
+    process.env.DRY_RUN = value === true ? 'true' : 'false';
+}
+
+function updateTradingConfig(newConfig) {
+    if (newConfig.buyAmountEur !== undefined) overrides.buyAmountEur = Number(newConfig.buyAmountEur);
+    if (newConfig.maxPriorityFeeEur !== undefined) overrides.maxPriorityFeeEur = Number(newConfig.maxPriorityFeeEur);
+    if (newConfig.slippageBps !== undefined) overrides.slippageBps = Number(newConfig.slippageBps);
+    if (newConfig.tpPercent !== undefined) overrides.tpPercent = Number(newConfig.tpPercent);
+    if (newConfig.slPercent !== undefined) overrides.slPercent = Number(newConfig.slPercent);
+    if (newConfig.autoBuyEnabled !== undefined) overrides.autoBuyEnabled = newConfig.autoBuyEnabled === true;
+}
+
 module.exports = {
     getHeliusConfig,
     switchToBackup,
     getTradingConfig,
+    setDryRun,
+    updateTradingConfig,
     PUMPFUN_PROGRAM_IDS,
     RAYDIUM_PROGRAM_IDS,
     ALL_DEX_PROGRAMS,
